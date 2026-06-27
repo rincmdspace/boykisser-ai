@@ -22,8 +22,11 @@ permissions:
   attestations: write
   id-token: write
 
+env:
+  BOYKISSER_VERSION: ${{ github.sha }}
+
 jobs:
-  build:
+  build-cli:
     strategy:
       fail-fast: false
       matrix:
@@ -40,15 +43,9 @@ jobs:
           - os: macos-15
             target: darwin-x64
             arch: x64
-          - os: windows-2025
-            target: windows-x64
-            arch: x64
-          - os: windows-2025-arm
-            target: windows-arm64
-            arch: arm64
 
     runs-on: ${{ matrix.os }}
-    name: build-${{ matrix.target }}
+    name: cli-${{ matrix.target }}
 
     steps:
       - uses: actions/checkout@f43a0e5ff2bd294095638e18286ca9a3d1956744 # v3.6.0
@@ -62,8 +59,6 @@ jobs:
         id: build
         run: ./packages/opencode/script/build.ts --single
         shell: bash
-        env:
-          BOYKISSER_VERSION: ${{ github.sha }}
 
       - name: List dist contents
         run: ls -la packages/opencode/dist/ || echo "No dist yet"
@@ -80,10 +75,8 @@ jobs:
               elif [ -f "$dirname/bin/opencode.exe" ]; then
                 mv "$dirname/bin/opencode.exe" "$dirname/bin/boykisser.exe"
               fi
-              # Create shortcuts
               ln -sf boykisser "$dirname/bin/b" 2>/dev/null || true
               ln -sf boykisser "$dirname/bin/rin" 2>/dev/null || true
-              ln -sf boykisser.exe "$dirname/bin/b.exe" 2>/dev/null || true
             fi
           done
 
@@ -93,22 +86,69 @@ jobs:
           cd packages/opencode/dist
           for dir in */; do
             dirname="${dir%/}"
-            if [ "$RUNNER_OS" = "Windows" ]; then
-              7z a -tzip "${dirname}.zip" "$dirname/"
-            else
-              tar -czf "${dirname}.tar.gz" "$dirname/"
-            fi
+            tar -czf "${dirname}.tar.gz" "$dirname/"
           done
 
-      - name: Upload build artifacts
+      - name: Upload CLI artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: boykisser-${{ matrix.target }}
+          name: boykisser-cli-${{ matrix.target }}
           path: packages/opencode/dist/
           if-no-files-found: warn
 
+  build-desktop-windows:
+    runs-on: windows-2025
+    name: desktop-windows-x64
+    steps:
+      - uses: actions/checkout@f43a0e5ff2bd294095638e18286ca9a3d1956744 # v3.6.0
+        with:
+          fetch-depth: 0
+
+      - name: Setup Bun
+        uses: ./.github/actions/setup-bun
+
+      - name: Build CLI first (desktop dependency)
+        run: ./packages/opencode/script/build.ts --single
+        shell: bash
+
+      - name: Build desktop app
+        shell: bash
+        run: |
+          cd packages/desktop
+          bun run prebuild
+          bun run build
+          npx electron-builder --win --config electron-builder.config.ts --publish never
+        env:
+          OPENCODE_CHANNEL: dev
+
+      - name: List desktop dist
+        shell: bash
+        run: ls -la packages/desktop/dist/ || echo "No desktop dist"
+
+      - name: Rename desktop installer
+        shell: bash
+        run: |
+          cd packages/desktop/dist
+          for f in *.exe; do
+            if [ -f "$f" ]; then
+              newname="Boykisser-desktop-windows-x64.exe"
+              mv "$f" "$newname"
+              echo "Renamed $f -> $newname"
+            fi
+          done
+          for f in *.exe; do
+            echo "✅ Desktop artifact: $f ($(stat -c%s "$f") bytes)"
+          done
+
+      - name: Upload desktop artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: boykisser-desktop-windows-x64
+          path: packages/desktop/dist/
+          if-no-files-found: warn
+
   create-release:
-    needs: build
+    needs: [build-cli, build-desktop-windows]
     if: github.event_name == 'workflow_dispatch' && inputs.release == true
     runs-on: ubuntu-24.04
     steps:
@@ -121,11 +161,15 @@ jobs:
         with:
           path: artifacts
 
+      - name: List artifacts
+        run: find artifacts -type f | head -30
+
       - name: Create Release
         run: |
-          TAG="build-$(date +%Y%m%d-%H%M%S)"
-          gh release create "$TAG" artifacts/**/*.{zip,tar.gz} \
-            --title "Boykisser Build $TAG" \
-            --notes "Automated build from ${{ github.sha }}"
+          TAG="v1.2.0"
+          FILES=$(find artifacts -type f \( -name "*.zip" -o -name "*.tar.gz" -o -name "*.exe" \) | sort)
+          gh release create "$TAG" $FILES \
+            --title "Boykisser AI v1.2.0" \
+            --notes "Boykisser AI v1.2.0 - Fully unrestricted AI coding agent"
         env:
           GH_TOKEN: ${{ github.token }}
