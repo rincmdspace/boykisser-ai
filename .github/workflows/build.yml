@@ -1,0 +1,131 @@
+name: Build Boykisser Executables
+
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+    branches: [dev]
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Create release with binaries"
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  actions: read
+  attestations: write
+  id-token: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: linux-x64
+            arch: x64
+          - os: ubuntu-24.04-arm
+            target: linux-arm64
+            arch: arm64
+          - os: macos-15
+            target: darwin-arm64
+            arch: arm64
+          - os: macos-15
+            target: darwin-x64
+            arch: x64
+          - os: windows-2025
+            target: windows-x64
+            arch: x64
+          - os: windows-2025-arm
+            target: windows-arm64
+            arch: arm64
+
+    runs-on: ${{ matrix.os }}
+    name: build-${{ matrix.target }}
+
+    steps:
+      - uses: actions/checkout@f43a0e5ff2bd294095638e18286ca9a3d1956744 # v3.6.0
+        with:
+          fetch-depth: 0
+
+      - name: Setup Bun
+        uses: ./.github/actions/setup-bun
+
+      - name: Build binary
+        id: build
+        run: ./packages/opencode/script/build.ts --single
+        shell: bash
+        env:
+          BOYKISSER_VERSION: ${{ github.sha }}
+
+      - name: List dist contents
+        run: ls -la packages/opencode/dist/ || echo "No dist yet"
+
+      - name: Rename binary to boykisser
+        shell: bash
+        run: |
+          cd packages/opencode/dist
+          for dir in */; do
+            if [ -d "$dir" ]; then
+              dirname="${dir%/}"
+              if [ -f "$dirname/bin/opencode" ]; then
+                mv "$dirname/bin/opencode" "$dirname/bin/boykisser"
+              elif [ -f "$dirname/bin/opencode.exe" ]; then
+                mv "$dirname/bin/opencode.exe" "$dirname/bin/boykisser.exe"
+              fi
+              # Create shortcuts
+              ln -sf boykisser "$dirname/bin/b" 2>/dev/null || true
+              ln -sf boykisser "$dirname/bin/rin" 2>/dev/null || true
+              ln -sf boykisser.exe "$dirname/bin/b.exe" 2>/dev/null || true
+            fi
+          done
+
+      - name: Create archive
+        shell: bash
+        run: |
+          cd packages/opencode/dist
+          for dir in */; do
+            dirname="${dir%/}"
+            if [ "$RUNNER_OS" = "Windows" ]; then
+              7z a -tzip "${dirname}.zip" "$dirname/"
+            else
+              tar -czf "${dirname}.tar.gz" "$dirname/"
+            fi
+          done
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: boykisser-${{ matrix.target }}
+          path: packages/opencode/dist/
+          if-no-files-found: warn
+
+  create-release:
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && inputs.release == true
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@f43a0e5ff2bd294095638e18286ca9a3d1956744 # v3.6.0
+        with:
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          path: artifacts
+
+      - name: Create Release
+        run: |
+          TAG="build-$(date +%Y%m%d-%H%M%S)"
+          gh release create "$TAG" artifacts/**/*.{zip,tar.gz} \
+            --title "Boykisser Build $TAG" \
+            --notes "Automated build from ${{ github.sha }}"
+        env:
+          GH_TOKEN: ${{ github.token }}
